@@ -13,6 +13,27 @@ done
 SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 
 # ── Config resolution ────────────────────────────────────────────────
+absolute_path() {
+  local path="$1"
+  if [[ "$path" == /* ]]; then
+    echo "$path"
+  else
+    echo "$(cd "$(dirname "$path")" && pwd)/$(basename "$path")"
+  fi
+}
+
+xml_escape() {
+  local value="$1"
+  value=${value//&/&amp;}
+  value=${value//</&lt;}
+  value=${value//>/&gt;}
+  echo "$value"
+}
+
+cli_path() {
+  absolute_path "$SOURCE"
+}
+
 resolve_conf() {
   if [[ -n "${OPT_CONFIG:-}" && -f "$OPT_CONFIG" ]]; then
     echo "$OPT_CONFIG"
@@ -35,6 +56,7 @@ load_conf() {
     echo "  Searched: --config, \$WATCHCLAW_CONF, ./watchclaw.conf, ~/.config/watchclaw/watchclaw.conf" >&2
     return 1
   fi
+  conf=$(absolute_path "$conf")
   # shellcheck disable=SC1090
   source "$conf"
   RESOLVED_CONF="$conf"
@@ -42,6 +64,152 @@ load_conf() {
 
 # ── Lock / PID helpers ───────────────────────────────────────────────
 lock_file() { echo "/tmp/watchclaw-${GATEWAY_PORT}.pid"; }
+
+launchd_label_from_conf() {
+  local base
+  base="$(basename "$RESOLVED_CONF")"
+  base="${base%.conf}"
+  base="${base#watchclaw-}"
+  [[ -z "$base" || "$base" == "watchclaw" ]] && base="default"
+  base="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-')"
+  base="${base#-}"
+  base="${base%-}"
+  [[ -z "$base" ]] && base="default"
+  echo "com.watchclaw.$base"
+}
+
+launchd_plist_path() {
+  local label="${1:-$(launchd_label_from_conf)}"
+  echo "${WATCHCLAW_LAUNCHAGENT_DIR:-$HOME/Library/LaunchAgents}/${label}.plist"
+}
+
+launchd_service_name() {
+  local label="${1:-$(launchd_label_from_conf)}"
+  local uid
+  uid=$(id -u 2>/dev/null || echo "")
+  [[ -n "$uid" ]] || return 1
+  echo "gui/$uid/$label"
+}
+
+write_launchd_plist() {
+  local label="$1"
+  local plist_path="$2"
+  local cli
+  cli=$(cli_path)
+
+  mkdir -p "$(dirname "$plist_path")"
+  cat > "$plist_path" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$(xml_escape "$label")</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$(xml_escape "$cli")</string>
+    <string>--config</string>
+    <string>$(xml_escape "$RESOLVED_CONF")</string>
+    <string>start</string>
+    <string>--foreground</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>$(xml_escape "${LOG_FILE:-$HOME/.config/watchclaw/watchclaw.log}")</string>
+  <key>StandardErrorPath</key>
+  <string>$(xml_escape "${LOG_FILE:-$HOME/.config/watchclaw/watchclaw.log}")</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>$(xml_escape "${PATH:-/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin}")</string>
+  </dict>
+  <key>WatchclawManaged</key>
+  <true/>
+</dict>
+</plist>
+EOF
+}
+
+find_launchd_service() {
+  [[ "$(uname -s 2>/dev/null)" == "Darwin" ]] || return 1
+  command -v launchctl >/dev/null 2>&1 || return 1
+
+  local uid
+  uid=$(id -u 2>/dev/null || echo "")
+  [[ -n "$uid" ]] || return 1
+
+  local locations=(
+    "${WATCHCLAW_LAUNCHAGENT_DIR:-$HOME/Library/LaunchAgents}:gui/$uid"
+    "/Library/LaunchAgents:gui/$uid"
+    "/Library/LaunchDaemons:system"
+  )
+
+  local location dir domain plist label
+  shopt -s nullglob
+  for location in "${locations[@]}"; do
+    dir="${location%%:*}"
+    domain="${location#*:}"
+    [[ -d "$dir" ]] || continue
+
+    for plist in "$dir"/*.plist; do
+      [[ -f "$plist" ]] || continue
+      grep -Fq "<string>$RESOLVED_CONF</string>" "$plist" 2>/dev/null || continue
+
+      label="$(basename "$plist" .plist)"
+      launchctl print "$domain/$label" >/dev/null 2>&1 || continue
+
+      printf '%s|%s|%s\n' "$domain" "$label" "$plist"
+      shopt -u nullglob
+      return 0
+    done
+  done
+  shopt -u nullglob
+  return 1
+}
+
+launchd_service_pid() {
+  local service="$1"
+  local pid
+  pid=$(launchctl print "$service" 2>/dev/null | sed -n 's/^[[:space:]]*pid = //p' | head -1 | tr -d ' ')
+  if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+    echo "$pid"
+    return 0
+  fi
+  return 1
+}
+
+start_via_launchd() {
+  local label plist_path service pid
+
+  label=$(launchd_label_from_conf)
+  plist_path=$(launchd_plist_path "$label")
+  service=$(launchd_service_name "$label") || return 1
+
+  write_launchd_plist "$label" "$plist_path"
+
+  launchctl enable "$service" >/dev/null 2>&1 || true
+  launchctl bootout "$service" >/dev/null 2>&1 || true
+  launchctl bootout "gui/$(id -u)" "$plist_path" >/dev/null 2>&1 || true
+
+  if ! launchctl bootstrap "gui/$(id -u)" "$plist_path" >/dev/null 2>&1; then
+    echo "ERROR: Failed to bootstrap launchd service $label" >&2
+    return 1
+  fi
+  launchctl kickstart -k "$service" >/dev/null 2>&1 || true
+
+  sleep 1
+  pid=$(running_pid)
+  if [[ -n "$pid" ]]; then
+    echo "Watchclaw running (launchd: $label, PID $pid). Logs: ${LOG_FILE:-./logs/watchclaw.log}"
+    return 0
+  fi
+
+  echo "ERROR: Watchclaw failed to start via launchd." >&2
+  return 1
+}
 
 running_pid() {
   local lf
@@ -54,6 +222,20 @@ running_pid() {
       return
     fi
   fi
+
+  local launchd_meta launchd_domain launchd_label launchd_pid
+  launchd_meta=$(find_launchd_service || true)
+  if [[ -n "$launchd_meta" ]]; then
+    launchd_domain="${launchd_meta%%|*}"
+    launchd_meta="${launchd_meta#*|}"
+    launchd_label="${launchd_meta%%|*}"
+    launchd_pid=$(launchd_service_pid "${launchd_domain}/${launchd_label}" || true)
+    if [[ -n "$launchd_pid" ]]; then
+      echo "$launchd_pid"
+      return
+    fi
+  fi
+
   echo ""
 }
 
@@ -72,6 +254,9 @@ cmd_start() {
     echo "Starting watchclaw (foreground) on port $GATEWAY_PORT..."
     export WATCHCLAW_FOREGROUND=1
     exec bash "$SCRIPT_DIR/watchclaw.sh" "$RESOLVED_CONF"
+  elif [[ "$(uname -s 2>/dev/null)" == "Darwin" ]]; then
+    echo "Starting watchclaw with launchd on port $GATEWAY_PORT..."
+    start_via_launchd || exit 1
   else
     echo "Starting watchclaw on port $GATEWAY_PORT..."
     local start_log="/tmp/watchclaw-start-$$.log"
@@ -102,10 +287,34 @@ cmd_start() {
 
 cmd_stop() {
   load_conf || exit 1
+  local launchd_service="" launchd_domain="" launchd_label="" launchd_plist=""
+  local launchd_meta
+  launchd_meta=$(find_launchd_service || true)
+  if [[ -n "$launchd_meta" ]]; then
+    launchd_domain="${launchd_meta%%|*}"
+    launchd_meta="${launchd_meta#*|}"
+    launchd_label="${launchd_meta%%|*}"
+    launchd_plist="${launchd_meta#*|}"
+    launchd_service="${launchd_domain}/${launchd_label}"
+
+    echo "Stopping watchclaw launchd service ($launchd_label)..."
+    if ! launchctl bootout "$launchd_service" >/dev/null 2>&1; then
+      echo "WARN: launchctl bootout failed for $launchd_label. Falling back to PID stop." >&2
+    else
+      sleep 1
+    fi
+    launchctl disable "$launchd_service" >/dev/null 2>&1 || true
+  fi
+
   local pid
   pid=$(running_pid)
   if [[ -z "$pid" ]]; then
-    echo "Watchclaw is not running on port $GATEWAY_PORT"
+    if [[ -n "$launchd_plist" ]]; then
+      rm -f "$(lock_file)"
+      echo "Stopped."
+    else
+      echo "Watchclaw is not running on port $GATEWAY_PORT"
+    fi
     exit 0
   fi
   echo "Stopping watchclaw (PID $pid)..."
@@ -128,6 +337,14 @@ cmd_status() {
   load_conf || exit 1
   local pid
   pid=$(running_pid)
+  local supervisor="direct"
+  local launchd_meta launchd_label
+  launchd_meta=$(find_launchd_service || true)
+  if [[ -n "$launchd_meta" ]]; then
+    launchd_meta="${launchd_meta#*|}"
+    launchd_label="${launchd_meta%%|*}"
+    supervisor="launchd ($launchd_label)"
+  fi
 
   echo "Watchclaw: v${VERSION}"
   echo ""
@@ -193,6 +410,7 @@ cmd_status() {
   echo "  State:          $state"
   [[ -n "$uptime_str" ]] && echo "  Uptime:         $uptime_str"
   echo "  PID:            $pid"
+  echo "  Supervisor:     $supervisor"
   echo "  Config:         $RESOLVED_CONF"
   echo "  Alert hook:     ${ALERT_HOOK:-none}"
   echo "  Dry-run:        $dry_run_str"

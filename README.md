@@ -77,12 +77,14 @@ watchclaw version                                Print version
 watchclaw help                                   Show help
 ```
 
+On macOS, `watchclaw start` uses a per-user `launchd` LaunchAgent for background mode. `watchclaw stop` boots out and disables the matching service so it does not immediately respawn.
+
 ### Options
 
 | Flag | Description |
 |------|-------------|
 | `--config PATH` | Path to config file |
-| `--foreground` | Run in foreground (start only) |
+| `--foreground` | Run in foreground (start only, bypasses `launchd` on macOS) |
 | `-f`, `--follow` | Follow log output in real-time (logs only) |
 | `--tail N` | Number of log lines to show (default: 50) |
 
@@ -103,6 +105,7 @@ Watchclaw: vX.X.X
   State:          HEALTHY
   Uptime:         2:14:30
   PID:            12345
+  Supervisor:     launchd (com.watchclaw.mybot)
   Config:         ./watchclaw.conf
   Alert hook:     webhook
   Dry-run:        False
