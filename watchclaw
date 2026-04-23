@@ -181,6 +181,12 @@ launchd_service_pid() {
   return 1
 }
 
+is_current_launchd_service() {
+  local label="$1"
+  [[ -n "${XPC_SERVICE_NAME:-}" ]] || return 1
+  [[ "$XPC_SERVICE_NAME" == "$label" ]]
+}
+
 start_via_launchd() {
   local label plist_path service pid
 
@@ -229,7 +235,11 @@ running_pid() {
     launchd_domain="${launchd_meta%%|*}"
     launchd_meta="${launchd_meta#*|}"
     launchd_label="${launchd_meta%%|*}"
-    launchd_pid=$(launchd_service_pid "${launchd_domain}/${launchd_label}" || true)
+    if ! is_current_launchd_service "$launchd_label"; then
+      launchd_pid=$(launchd_service_pid "${launchd_domain}/${launchd_label}" || true)
+    else
+      launchd_pid=""
+    fi
     if [[ -n "$launchd_pid" ]]; then
       echo "$launchd_pid"
       return
