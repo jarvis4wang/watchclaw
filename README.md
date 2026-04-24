@@ -342,3 +342,7 @@ Issues and PRs welcome. If you build a new alert hook, please include a test cas
 ## 📜 License
 
 [MIT](LICENSE) — Bruski & Jarvis Wang, 2026
+
+## Download History
+
+[![Download History](https://skill-history.com/chart/jarvis4wang/watchclaw.svg)](https://skill-history.com/jarvis4wang/watchclaw)
