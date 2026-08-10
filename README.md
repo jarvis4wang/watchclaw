@@ -1,3 +1,5 @@
+
+
 # 🦞 Watchclaw 👼
 
 <p align="center">
@@ -14,11 +16,11 @@
 
 ---
 
-The idea came from those countless moments where you ask your OpenClaw agent to upgrade but it ends up killing itself, perhaps due to a bad config change, who knows? Suddenly, the gateway crashes, your channels become slient — WhatsApp, Telegram, Discord, all of them. You have to drop your coffee, unlock your Mac Mini or SSH in somewhere and scratch your head to fix it.
+The idea came from those countless moments where you ask your OpenClaw agent to upgrade but it ends up killing itself, perhaps due to a bad config change, who knows? Suddenly, the gateway crashes, your channels become silent — WhatsApp, Telegram, Discord, all of them. You have to drop your coffee, unlock your Mac Mini or SSH in somewhere and scratch your head to fix it.
 
 Enough!
 
-**Watchclaw is the guarding angle for your lobster.** It monitors gateway health, auto-recovers from bad configs using the last "known-good" commit in the git history, and alerts you when things go sideways.
+**Watchclaw is the guardian angel for your lobster.** It monitors gateway health, auto-recovers from bad configs using the last "known-good" commit in the git history, and alerts you when things go sideways.
 
 ## ✨ Features
 
